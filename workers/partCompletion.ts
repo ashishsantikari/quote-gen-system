@@ -1,0 +1,59 @@
+import type { IEventBus } from "../core/ports/IEventBus";
+import { EventType } from "../core/events/types";
+
+interface PartStageTracker {
+  form: boolean;
+  "2d": boolean;
+  "3d": boolean;
+}
+
+export function partCompletion(eventBus: IEventBus): void {
+  const tracker = new Map<string, PartStageTracker>();
+
+  const key = (quoteId: string, partId: string) => `${quoteId}_${partId}`;
+
+  eventBus.subscribe(EventType.part_form_complete, async (event) => {
+    if (event.type !== EventType.part_form_complete) return;
+    const { quoteId, partId } = event.payload;
+    const k = key(quoteId, partId);
+    const entry = tracker.get(k) || { form: false, "2d": false, "3d": false };
+    entry.form = true;
+    tracker.set(k, entry);
+    checkPartComplete(quoteId, partId, entry, k);
+  });
+
+  eventBus.subscribe(EventType.part_2d_complete, async (event) => {
+    if (event.type !== EventType.part_2d_complete) return;
+    const { quoteId, partId } = event.payload;
+    const k = key(quoteId, partId);
+    const entry = tracker.get(k) || { form: false, "2d": false, "3d": false };
+    entry["2d"] = true;
+    tracker.set(k, entry);
+    checkPartComplete(quoteId, partId, entry, k);
+  });
+
+  eventBus.subscribe(EventType.part_3d_complete, async (event) => {
+    if (event.type !== EventType.part_3d_complete) return;
+    const { quoteId, partId } = event.payload;
+    const k = key(quoteId, partId);
+    const entry = tracker.get(k) || { form: false, "2d": false, "3d": false };
+    entry["3d"] = true;
+    tracker.set(k, entry);
+    checkPartComplete(quoteId, partId, entry, k);
+  });
+
+  async function checkPartComplete(
+    quoteId: string,
+    partId: string,
+    entry: PartStageTracker,
+    k: string
+  ): Promise<void> {
+    if (entry.form && entry["2d"] && entry["3d"]) {
+      tracker.delete(k);
+      await eventBus.publish({
+        type: EventType.part_processing_complete,
+        payload: { quoteId, partId },
+      });
+    }
+  }
+}
