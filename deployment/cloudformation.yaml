@@ -1,0 +1,1152 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Quote Generation System — API Gateway + 13 Workers (Fargate)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Comma-separated subnets
+  MongoDBUri:
+    Type: String
+    NoEcho: true
+  S3AccessKey:
+    Type: String
+    NoEcho: true
+  S3SecretKey:
+    Type: String
+    NoEcho: true
+  S3Endpoint:
+    Type: String
+  S3Bucket:
+    Type: String
+    Default: quote-gen-uploads
+  S3Region:
+    Type: String
+    Default: us-east-1
+  SmtpHost:
+    Type: String
+  SmtpPort:
+    Type: String
+    Default: "587"
+  SmtpUser:
+    Type: String
+    NoEcho: true
+  SmtpPass:
+    Type: String
+    NoEcho: true
+  QuoteExpiryHours:
+    Type: Number
+    Default: 24
+  QuoteTimeoutSeconds:
+    Type: Number
+    Default: 25
+
+Resources:
+
+  # ── ECS Cluster ──
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: quote-gen-cluster
+
+  # ── Security Groups ──
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB — inbound HTTP
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS tasks — allow from ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  # ── Application Load Balancer ──
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: quote-gen-alb
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      Scheme: internet-facing
+      Type: application
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: quote-gen-api-tg
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+
+  # ── S3 Buckets ──
+
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3Bucket
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+
+  PdfsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3Bucket}-pdfs"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # ── SQS Queue ──
+
+  EventBusQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: quote-events
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600
+
+  # ── IAM Role ──
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: quote-gen-ecs-execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: QuoteGenS3SqsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/*"
+                  - !Sub "arn:aws:s3:::${S3Bucket}-pdfs/*"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource: !GetAtt EventBusQueue.Arn
+
+  # ── CloudWatch Log Group — API ──
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/quote-gen-api
+      RetentionInDays: 14
+
+  # ── API Gateway Task Definition + Service ──
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-api
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: api
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-api:latest"
+          PortMappings:
+            - ContainerPort: 3000
+          Environment:
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ApiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+
+  ApiService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref ApiTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - TargetGroupArn: !Ref ApiTargetGroup
+          ContainerName: api
+          ContainerPort: 3000
+    DependsOn: AlbListener
+
+  # ══════════════════════════════════════════
+  # WORKERS — 1: formProcessor
+  # ══════════════════════════════════════════
+
+  WorkerFormProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-formProcessor, RetentionInDays: 14 }
+  WorkerFormProcessorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-formProcessor
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: formProcessor
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-formProcessor
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: formProcessor
+  WorkerFormProcessorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerFormProcessorTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 2: twoDProcessor
+  # ══════════════════════════════════════════
+
+  WorkerTwoDProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-twoDProcessor, RetentionInDays: 14 }
+  WorkerTwoDProcessorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-twoDProcessor
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: twoDProcessor
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-twoDProcessor
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: twoDProcessor
+  WorkerTwoDProcessorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerTwoDProcessorTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 3: threeDProcessor
+  # ══════════════════════════════════════════
+
+  WorkerThreeDProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-threeDProcessor, RetentionInDays: 14 }
+  WorkerThreeDProcessorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-threeDProcessor
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: threeDProcessor
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-threeDProcessor
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: threeDProcessor
+  WorkerThreeDProcessorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerThreeDProcessorTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 4: partCompletion
+  # ══════════════════════════════════════════
+
+  WorkerPartCompletionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-partCompletion, RetentionInDays: 14 }
+  WorkerPartCompletionTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-partCompletion
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: partCompletion
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-partCompletion
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: partCompletion
+  WorkerPartCompletionService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerPartCompletionTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 5: quoteCompletion
+  # ══════════════════════════════════════════
+
+  WorkerQuoteCompletionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-quoteCompletion, RetentionInDays: 14 }
+  WorkerQuoteCompletionTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-quoteCompletion
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: quoteCompletion
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-quoteCompletion
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: quoteCompletion
+  WorkerQuoteCompletionService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerQuoteCompletionTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 6: quoteGenerator
+  # ══════════════════════════════════════════
+
+  WorkerQuoteGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-quoteGenerator, RetentionInDays: 14 }
+  WorkerQuoteGeneratorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-quoteGenerator
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: quoteGenerator
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-quoteGenerator
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: quoteGenerator
+  WorkerQuoteGeneratorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerQuoteGeneratorTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 7: notificationService
+  # ══════════════════════════════════════════
+
+  WorkerNotificationServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-notificationService, RetentionInDays: 14 }
+  WorkerNotificationServiceTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-notificationService
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: notificationService
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-notificationService
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: notificationService
+  WorkerNotificationServiceService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerNotificationServiceTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 8: pdfGenerator
+  # ══════════════════════════════════════════
+
+  WorkerPdfGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-pdfGenerator, RetentionInDays: 14 }
+  WorkerPdfGeneratorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-pdfGenerator
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: pdfGenerator
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-pdfGenerator
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: pdfGenerator
+  WorkerPdfGeneratorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerPdfGeneratorTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 9: emailWorker
+  # ══════════════════════════════════════════
+
+  WorkerEmailWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-emailWorker, RetentionInDays: 14 }
+  WorkerEmailWorkerTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-emailWorker
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: emailWorker
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-emailWorker
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: emailWorker
+  WorkerEmailWorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerEmailWorkerTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 10: mongoPersister
+  # ══════════════════════════════════════════
+
+  WorkerMongoPersisterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-mongoPersister, RetentionInDays: 14 }
+  WorkerMongoPersisterTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-mongoPersister
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: mongoPersister
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-mongoPersister
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: mongoPersister
+  WorkerMongoPersisterService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerMongoPersisterTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 11: cleanupWorker
+  # ══════════════════════════════════════════
+
+  WorkerCleanupWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-cleanupWorker, RetentionInDays: 14 }
+  WorkerCleanupWorkerTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-cleanupWorker
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: cleanupWorker
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-cleanupWorker
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: cleanupWorker
+  WorkerCleanupWorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerCleanupWorkerTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 12: retryQueue
+  # ══════════════════════════════════════════
+
+  WorkerRetryQueueLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-retryQueue, RetentionInDays: 14 }
+  WorkerRetryQueueTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-retryQueue
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: retryQueue
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-retryQueue
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: retryQueue
+  WorkerRetryQueueService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerRetryQueueTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+  # ══════════════════════════════════════════
+  # WORKERS — 13: deadLetter
+  # ══════════════════════════════════════════
+
+  WorkerDeadLetterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /ecs/quote-gen-worker-deadLetter, RetentionInDays: 14 }
+  WorkerDeadLetterTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: quote-gen-worker-deadLetter
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/quote-gen-worker:latest"
+          Environment:
+            - Name: WORKER_NAME
+              Value: deadLetter
+            - Name: MONGODB_URI
+              Value: !Ref MongoDBUri
+            - Name: S3_ENDPOINT
+              Value: !Ref S3Endpoint
+            - Name: S3_REGION
+              Value: !Ref S3Region
+            - Name: S3_ACCESS_KEY
+              Value: !Ref S3AccessKey
+            - Name: S3_SECRET_KEY
+              Value: !Ref S3SecretKey
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: SMTP_PASS
+              Value: !Ref SmtpPass
+            - Name: QUOTE_EXPIRY_HOURS
+              Value: !Ref QuoteExpiryHours
+            - Name: QUOTE_TIMEOUT_SECONDS
+              Value: !Ref QuoteTimeoutSeconds
+            - Name: SQS_QUEUE_URL
+              Value: !Ref EventBusQueue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/quote-gen-worker-deadLetter
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: deadLetter
+  WorkerDeadLetterService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerDeadLetterTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref EcsSecurityGroup]
+          AssignPublicIp: ENABLED
+
+Outputs:
+  LoadBalancerDnsName:
+    Value: !GetAtt Alb.DNSName
+    Description: ALB DNS name for API Gateway
+  S3BucketName:
+    Value: !Ref S3Bucket
+    Description: S3 bucket for uploads
+  EcsClusterName:
+    Value: !Ref EcsCluster
+    Description: ECS cluster name
+  SqsQueueUrl:
+    Value: !Ref EventBusQueue
+    Description: SQS event bus queue URL

@@ -1,0 +1,513 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "loki", "uid": "loki" },
+        "enable": true,
+        "expr": "{component=~\"circuit-breaker|twoDProcessor|threeDProcessor\", level=\"warn\"} | json | msg=~\"state change|circuit open\"",
+        "hide": false,
+        "iconColor": "red",
+        "name": "Circuit Breaker Events",
+        "tagKeys": "component,msg",
+        "textFormat": "CB {{msg}}",
+        "titleFormat": "{{component}}"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "panels": [],
+      "title": "API Gateway",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "fillOpacity": 20, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "scaleDistribution": { "type": "linear" }, "thresholdsStyle": { "mode": "off" } },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 101,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(rate({component=\"api-gateway\"} | json | msg=\"request\" [$__auto])) by (path)",
+          "legendFormat": "{{path}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Rate by Path",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 2000 }] },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "id": 102,
+      "options": { "orientation": "auto", "reduceOptions": { "calcs": ["mean"] }, "text": { "valueSize": 20 } },
+      "targets": [
+        { "expr": "avg({component=\"api-gateway\"} | json | unwrap durationMs) by (path)", "legendFormat": "{{path}}", "refId": "A" }
+      ],
+      "title": "Avg Latency by Path",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 10 }] },
+          "unit": "percent"
+        }
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "id": 103,
+      "options": { "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": {} },
+      "targets": [
+        {
+          "expr": "sum(rate({component=\"api-gateway\"} | json | statusCode >= 400 [$__auto])) / sum(rate({component=\"api-gateway\"} | json [$__auto])) * 100",
+          "legendFormat": "Error Rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate %",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "id": 200,
+      "panels": [],
+      "title": "Event Bus",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "fillOpacity": 20, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "scaleDistribution": { "type": "linear" }, "thresholdsStyle": { "mode": "off" } },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "id": 201,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(rate({component=~\"InMemoryEventBus|RedisEventBus\"} | json | msg=\"publish\" [$__auto])) by (eventType)",
+          "legendFormat": "{{eventType}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Events Published by Type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "fillOpacity": 20, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "scaleDistribution": { "type": "linear" } },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "id": 202,
+      "options": { "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [
+        {
+          "expr": "count_over_time({component=\"api-gateway\"} | json | msg=\"request\" | __error__=\"\" [1h])",
+          "legendFormat": "Requests (1h)",
+          "refId": "A"
+        },
+        {
+          "expr": "count_over_time({component=~\"InMemoryEventBus|RedisEventBus\"} | json | msg=\"publish\" | __error__=\"\" [1h])",
+          "legendFormat": "Events Published (1h)",
+          "refId": "B"
+        },
+        {
+          "expr": "count_over_time({component=\"mongoPersister\"} | json | msg=\"persisted\" | __error__=\"\" [1h])",
+          "legendFormat": "DB Writes (1h)",
+          "refId": "C"
+        }
+      ],
+      "title": "System Throughput (1h)",
+      "type": "gauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 300,
+      "panels": [],
+      "title": "Worker Processing",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 30, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1 },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "id": 301,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "avg({component=~\"formProcessor|twoDProcessor|threeDProcessor|quoteGenerator|emailWorker\"} | json | msg=~\"processing.*\" | unwrap durationMs) by (component)",
+          "legendFormat": "{{component}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker Processing Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 25 }] },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 19 },
+      "id": 302,
+      "options": { "orientation": "auto", "reduceOptions": { "calcs": ["mean"] }, "text": {} },
+      "targets": [
+        {
+          "expr": "avg({component=\"quoteGenerator\"} | json | msg=\"quote generated\" | unwrap durationMs) / 1000",
+          "legendFormat": "Quote Generation",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Quote Gen Time",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 10 }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 19 },
+      "id": 303,
+      "options": { "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": {} },
+      "targets": [
+        {
+          "expr": "count_over_time({component=~\"formProcessor|twoDProcessor|threeDProcessor\"} | json | level=\"error\" [5m])",
+          "legendFormat": "Worker Errors (5m)",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker Errors (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 25, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "stacking": { "mode": "normal" } },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "id": 304,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(rate({level=\"error\"} | json [$__auto])) by (component)",
+          "legendFormat": "{{component}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors by Component",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 25, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "stacking": { "mode": "normal" } },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "id": 305,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(rate({level=\"warn\"} | json [$__auto])) by (component)",
+          "legendFormat": "{{component}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Warnings by Component",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "id": 400,
+      "panels": [],
+      "title": "Quote Pipeline Funnel",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 36 },
+      "id": 401,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=\"QuoteCreated\"} | json [$__range])", "legendFormat": "QUOTE_INIT", "refId": "A" }
+      ],
+      "title": "QUOTE_INIT",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 36 },
+      "id": 402,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=~\"FormUploaded|FileUploaded\"} | json | msg=\"publish\" [$__range])", "legendFormat": "Uploads", "refId": "A" }
+      ],
+      "title": "Form + File Uploads",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 36 },
+      "id": 403,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=~\"QuoteInfoComplete|QuoteTimedOut\"} | json [$__range])", "legendFormat": "Complete", "refId": "A" }
+      ],
+      "title": "QUOTE_INFO_COMPLETE",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 40 },
+      "id": 404,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=\"QuoteGenerated\"} | json [$__range])", "legendFormat": "Generated", "refId": "A" }
+      ],
+      "title": "Quotes Generated",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 40 },
+      "id": 405,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=\"PdfGenerated\"} | json [$__range])", "legendFormat": "PDF", "refId": "A" }
+      ],
+      "title": "PDFs Generated",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 40 },
+      "id": 406,
+      "options": { "colorMode": "background", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "text": { "titleSize": 14, "valueSize": 36 } },
+      "targets": [
+        { "expr": "count_over_time({eventType=\"EmailSent\"} | json [$__range])", "legendFormat": "Emails", "refId": "A" }
+      ],
+      "title": "Emails Sent",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 30, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "id": 407,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "count_over_time({eventType=\"QuoteCreated\"} | json [$__auto])",
+          "legendFormat": "Created",
+          "refId": "A"
+        },
+        {
+          "expr": "count_over_time({eventType=\"QuoteInfoComplete\"} | json [$__auto])",
+          "legendFormat": "Completed",
+          "refId": "B"
+        },
+        {
+          "expr": "count_over_time({eventType=\"QuoteTimedOut\"} | json [$__auto])",
+          "legendFormat": "Timed Out",
+          "refId": "C"
+        },
+        {
+          "expr": "count_over_time({eventType=\"QuoteCancelled\"} | json [$__auto])",
+          "legendFormat": "Cancelled",
+          "refId": "D"
+        }
+      ],
+      "title": "Quote Funnel Over Time",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 72 },
+      "id": 500,
+      "panels": [],
+      "title": "Logs Explorer",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 73 },
+      "id": 501,
+      "options": {
+        "dedupStrategy": "exact",
+        "enableLogDetails": true,
+        "previewLimit": 100,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "expr": "{component=~\".+\"} | json | line_format `[{{.level}}] {{.component}} {{.msg}} {{if .quoteId}}quoteId={{.quoteId}} {{end}}{{if .traceId}}traceId={{.traceId}} {{end}}{{if .durationMs}}({{.durationMs}}ms){{end}}`",
+          "refId": "A"
+        }
+      ],
+      "title": "All Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["quote-gen", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": { "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values(component)",
+        "includeAll": true,
+        "label": "Component",
+        "multi": true,
+        "name": "component",
+        "query": "label_values(component)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": { "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values(level)",
+        "includeAll": true,
+        "label": "Log Level",
+        "multi": true,
+        "name": "loglevel",
+        "query": "label_values(level)",
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Quote Generation System",
+  "uid": "quote-gen-dashboard",
+  "version": 1,
+  "weekStart": ""
+}
