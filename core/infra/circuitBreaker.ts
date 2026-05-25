@@ -1,0 +1,60 @@
+import { Logger } from "../telemetry/logger";
+
+const log = new Logger({ component: "circuit-breaker" });
+
+export class CircuitBreaker {
+  private failures: number[] = [];
+  private state: "CLOSED" | "OPEN" | "HALF_OPEN" = "CLOSED";
+  private openedAt: number = 0;
+  private readonly failureThreshold: number;
+  private readonly windowMs: number;
+  private readonly openTimeoutMs: number;
+
+  constructor(options?: { failureThreshold?: number; windowMs?: number; openTimeoutMs?: number }) {
+    this.failureThreshold = options?.failureThreshold ?? 5;
+    this.windowMs = options?.windowMs ?? 120_000;
+    this.openTimeoutMs = options?.openTimeoutMs ?? 30_000;
+  }
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "OPEN") {
+      if (Date.now() - this.openedAt >= this.openTimeoutMs) {
+        this.transitionTo("HALF_OPEN");
+      } else {
+        log.warn("circuit open, fast-failing");
+        throw new Error("Circuit breaker is OPEN");
+      }
+    }
+    try {
+      const result = await fn();
+      if (this.state === "HALF_OPEN") {
+        this.transitionTo("CLOSED");
+      }
+      return result;
+    } catch (error) {
+      this.recordFailure();
+      throw error;
+    }
+  }
+
+  private transitionTo(state: "CLOSED" | "OPEN" | "HALF_OPEN"): void {
+    const from = this.state;
+    this.state = state;
+    if (state === "OPEN") this.openedAt = Date.now();
+    if (state === "CLOSED") this.failures = [];
+    log.warn("state change", { from, to: state, failureCount: this.failures.length });
+  }
+
+  private recordFailure(): void {
+    const now = Date.now();
+    this.failures = this.failures.filter(t => now - t < this.windowMs);
+    this.failures.push(now);
+    if (this.failures.length >= this.failureThreshold) {
+      this.transitionTo("OPEN");
+    }
+  }
+
+  getState(): string {
+    return this.state;
+  }
+}
