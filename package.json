@@ -1,0 +1,46 @@
+{
+  "name": "quote-gen-system",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "version": "0.0.1",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/hapi__joi": "^17.1.15",
+    "@types/ioredis": "^5.0.0",
+    "@types/joi": "^17.2.3",
+    "@types/nodemailer": "^8.0.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1053.0",
+    "@aws-sdk/s3-request-presigner": "^3.1053.0",
+    "@bull-board/api": "^7.1.5",
+    "@bull-board/hapi": "^7.1.5",
+    "@bull-board/ui": "^7.1.5",
+    "@hapi/h2o2": "^10.0.4",
+    "@hapi/hapi": "^21.4.9",
+    "@hapi/inert": "^7.1.1",
+    "@hapi/vision": "^7.0.3",
+    "bullmq": "^5.77.3",
+    "ejs": "^6.0.1",
+    "hapi-swagger": "^17.3.2",
+    "ioredis": "^5.10.1",
+    "joi": "^18.2.1",
+    "mongoose": "^9.6.2",
+    "nodemailer": "^8.0.8",
+    "uuid": "^14.0.0"
+  },
+  "scripts": {
+    "dev": "bun --watch index.ts",
+    "start": "bun index.ts",
+    "worker": "bun --watch worker.ts",
+    "start:worker": "bun worker.ts",
+    "test": "bun test",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "typecheck": "bun run tsc --noEmit"
+  }
+}

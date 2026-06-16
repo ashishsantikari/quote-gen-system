@@ -1,0 +1,91 @@
+graph TD
+    User((User))
+
+    subgraph Presentation ["Presentation Layer (Hapi API Gateway)"]
+        direction TB
+        API[API Gateway]
+        subgraph Plugins
+            QP[Quote Plugin]
+            AP[Admin Plugin]
+            S3H[S3Hook Plugin]
+            PP[Proxy Plugin]
+        end
+    end
+
+    subgraph Messaging ["Messaging Layer"]
+        Bus[Event Bus / Redis Pub/Sub]
+    end
+
+    subgraph Workers ["Worker Layer"]
+        direction TB
+        subgraph Bridge
+            S3EB[S3 Event Bridge]
+        end
+        subgraph Processors
+            FP[Form Processor]
+            2DP[2D Processor + CB/Retry]
+            3DP[3D Processor + CB/Retry]
+        end
+        subgraph Aggregators
+            PC[Part Completion]
+            QC[Quote Completion - 25s Timer]
+        end
+        subgraph Business_Logic
+            RE[Rules Engine - Internal]
+            CS[Calculation Service - External]
+        end
+        subgraph Generators
+            PG[PDF Generator]
+        end
+        subgraph Output
+            EW[Email Worker]
+            NS[Notification Service - WS]
+        end
+        MP[Mongo Persister - Single Writer]
+    end
+
+    subgraph Infra ["Infrastructure"]
+        S3[(S3 / Minio)]
+        DB[(MongoDB)]
+        RD[(Redis / DLQ)]
+    end
+
+    %% Flow Connections
+    User -->|POST /quote/create| QP
+    User -->|Upload Files| S3
+    S3 -.->|Minio Events| S3EB
+    S3EB --> Bus
+    QP --> Bus
+    
+    Bus --> FP & 2DP & 3DP
+    FP & 2DP & 3DP --> Bus
+    
+    Bus --> PC
+    PC --> Bus
+    Bus --> QC
+    QC --> Bus
+    
+    Bus --> RE
+    RE <--> CS
+    RE --> DB
+    RE --> Bus
+    
+    Bus --> PG
+    PG --> Bus
+    
+    Bus --> EW
+    Bus --> NS
+    
+    Bus --> MP
+    MP --> DB
+    Bus --> RD
+
+    %% Styling
+    classDef layer fill:#fdfdfd,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
+    class Presentation,Messaging,Workers,Infra layer;
+    classDef storage fill:#e1f5fe,stroke:#01579b;
+    class S3,DB,RD storage;
+    classDef worker fill:#fff3e0,stroke:#ef6c00;
+    class S3EB,FP,2DP,3DP,PC,QC,RE,CS,PG,EW,NS,MP worker;
+    classDef bus fill:#f3e5f5,stroke:#7b1fa2;
+    class Bus bus;
